@@ -60,6 +60,26 @@ export default function LocationShare() {
 
   return (
     <div style={{ padding: 20 }}>
+      {coords && (
+        <div style={{ marginTop: 20 }}>
+          <p>
+            <strong>Location Link:</strong>
+          </p>
+
+          <a
+            href={`https://www.google.com/maps?q=${coords.lat},${coords.lng}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              color: 'blue',
+              textDecoration: 'underline',
+              fontSize: 16,
+            }}
+          >
+            Open in Google Maps
+          </a>
+        </div>
+      )}
       <h3>Roadside Location Share</h3>
 
       <p>Request ID: {crypto.randomUUID()}</p>
