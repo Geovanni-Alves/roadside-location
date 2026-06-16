@@ -1,105 +1,83 @@
 import { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
 
 export default function LocationShare() {
-  const { token } = useParams();
-
   const [coords, setCoords] = useState(null);
   const [accuracy, setAccuracy] = useState(null);
+  const [bestAccuracy, setBestAccuracy] = useState(null);
   const [sent, setSent] = useState(false);
 
-  const REQUIRED_ACCURACY = 5;
-
-  // useEffect(() => {
-  //   if (!navigator.geolocation) return;
-
-  //   const watchId = navigator.geolocation.watchPosition(
-  //     (pos) => {
-  //       setCoords({
-  //         lat: pos.coords.latitude,
-  //         lng: pos.coords.longitude,
-  //       });
-
-  //       setAccuracy(pos.coords.accuracy);
-  //     },
-  //     (err) => console.log(err),
-  //     {
-  //       enableHighAccuracy: true,
-  //       maximumAge: 0,
-  //     },
-  //   );
-
-  //   return () => navigator.geolocation.clearWatch(watchId);
-  // }, []);
   useEffect(() => {
-    if (!navigator.geolocation) {
-      console.log('NO GEOLOCATION SUPPORT');
-      return;
-    }
-
-    console.log('REQUESTING GPS...');
+    if (!navigator.geolocation) return;
 
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
-        console.log('GPS OK:', pos);
+        const acc = pos.coords.accuracy;
 
         setCoords({
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
         });
 
-        setAccuracy(pos.coords.accuracy);
+        setAccuracy(acc);
+
+        // 🔥 pega melhor precisão já vista
+        setBestAccuracy((prev) => (prev === null ? acc : Math.min(prev, acc)));
       },
       (err) => {
         console.log('GPS ERROR:', err);
-
-        alert(`GPS ERROR: ${err.message}`);
       },
       {
         enableHighAccuracy: true,
         maximumAge: 0,
-        timeout: 15000,
+        timeout: 10000,
       },
     );
 
-    return () => {
-      console.log('CLEARING WATCH');
-      navigator.geolocation.clearWatch(watchId);
-    };
+    return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  const ready = coords && accuracy && accuracy <= REQUIRED_ACCURACY;
+  const getStatus = (acc) => {
+    if (!acc) return 'WAITING';
+    if (acc <= 10) return 'EXCELLENT';
+    if (acc <= 25) return 'GOOD';
+    return 'POOR';
+  };
+
+  const status = getStatus(bestAccuracy);
+
+  const canSend = coords && bestAccuracy && bestAccuracy <= 25;
 
   const sendLocation = () => {
     const link = `https://www.google.com/maps?q=${coords.lat},${coords.lng}`;
 
-    alert(`
-TOKEN: ${token}
-
-LOCATION SENT:
-${link}
-    `);
-
+    alert('LOCATION SENT:\n\n' + link);
     setSent(true);
   };
 
   if (sent) {
-    return <h3>Location sent successfully ✅</h3>;
+    return <h3>Location sent ✅</h3>;
   }
 
   return (
     <div style={{ padding: 20 }}>
       <h3>Roadside Location Share</h3>
 
-      <p>Request ID: {token}</p>
+      <p>Request ID: {crypto.randomUUID()}</p>
 
-      {!accuracy && <p>Waiting for GPS...</p>}
+      {!bestAccuracy && <p>Waiting for GPS signal...</p>}
 
-      {accuracy && <p>Accuracy: {Math.round(accuracy)}m</p>}
+      {bestAccuracy && <p>Accuracy: {Math.round(bestAccuracy)}m</p>}
 
-      {!ready && accuracy && <p>Waiting for precise GPS (≤ 5m)</p>}
+      <p>
+        Status: {status === 'EXCELLENT' && '🟢 Excellent signal'}
+        {status === 'GOOD' && '🟡 Good signal'}
+        {status === 'POOR' && '🔴 Weak signal'}
+        {status === 'WAITING' && '⏳ Searching GPS...'}
+      </p>
 
-      <button disabled={!ready} onClick={sendLocation}>
+      {bestAccuracy > 25 && <p>Move outside for better accuracy</p>}
+
+      <button disabled={!canSend} onClick={sendLocation}>
         Send Location
       </button>
     </div>
