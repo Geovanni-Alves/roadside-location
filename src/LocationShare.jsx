@@ -20,7 +20,7 @@ export default function LocationShare() {
 
         setAccuracy(acc);
 
-        // 🔥 pega melhor precisão já vista
+        // take the best gps accuracy
         setBestAccuracy((prev) => (prev === null ? acc : Math.min(prev, acc)));
       },
       (err) => {

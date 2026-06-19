@@ -63,8 +63,7 @@ This link is:
 
   return (
     <div style={{ padding: 20 }}>
-      {/* <h2>Dispatcher Panel</h2> */}
-      <h2>testing deployment</h2>
+      <h2>Dispatcher Panel</h2>
       <input
         placeholder="Customer Name"
         value={form.name}
