@@ -4,15 +4,21 @@ import { useParams } from "react-router-dom";
 
 export default function LocationShare() {
   const { token } = useParams();
+
   const [coords, setCoords] = useState(null);
   const [accuracy, setAccuracy] = useState(null);
   const [bestAccuracy, setBestAccuracy] = useState(null);
-  const [sent, setSent] = useState(false);
+
   const [request, setRequest] = useState(null);
   const [loading, setLoading] = useState(true);
   const [expired, setExpired] = useState(false);
   const [invalidToken, setInvalidToken] = useState(false);
 
+  const REQUIRED_ACCURACY = 10;
+
+  // -------------------------
+  // VALIDATE TOKEN (SUPABASE)
+  // -------------------------
   useEffect(() => {
     const validateToken = async () => {
       const { data, error } = await supabase
@@ -40,6 +46,9 @@ export default function LocationShare() {
     validateToken();
   }, [token]);
 
+  // -------------------------
+  // GPS WATCH
+  // -------------------------
   useEffect(() => {
     if (!navigator.geolocation) return;
 
@@ -50,16 +59,15 @@ export default function LocationShare() {
         setCoords({
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
+          heading: pos.coords.heading,
+          speed: pos.coords.speed,
         });
 
         setAccuracy(acc);
 
-        // take the best gps accuracy
         setBestAccuracy((prev) => (prev === null ? acc : Math.min(prev, acc)));
       },
-      (err) => {
-        console.log("GPS ERROR:", err);
-      },
+      (err) => console.log("GPS ERROR:", err),
       {
         enableHighAccuracy: true,
         maximumAge: 0,
@@ -70,90 +78,134 @@ export default function LocationShare() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
+  // -------------------------
+  // STATUS
+  // -------------------------
   const getStatus = (acc) => {
     if (!acc) return "WAITING";
     if (acc <= 10) return "EXCELLENT";
-    if (acc <= 25) return "GOOD";
+    if (acc <= 20) return "GOOD";
     return "POOR";
   };
 
   const status = getStatus(bestAccuracy);
 
-  const canSend = coords && bestAccuracy && bestAccuracy <= 25;
+  const canSend = coords && bestAccuracy && bestAccuracy <= REQUIRED_ACCURACY;
 
-  const sendLocation = () => {
+  // -------------------------
+  // SEND LOCATION
+  // -------------------------
+  const sendLocation = async () => {
+    await supabase
+      .from("requests")
+      .update({
+        latitude: coords.lat,
+        longitude: coords.lng,
+        accuracy: bestAccuracy,
+        status: "location_sent",
+      })
+      .eq("token", token);
+
     const link = `https://www.google.com/maps?q=${coords.lat},${coords.lng}`;
 
     alert("LOCATION SENT:\n\n" + link);
-    setSent(true);
   };
 
-  if (sent) {
-    return <h3>Location sent ✅</h3>;
-  }
+  // -------------------------
+  // STATES
+  // -------------------------
+  if (loading) return <h3>Checking request...</h3>;
 
-  if (loading) {
-    return <h3>Checking request...</h3>;
-  }
-
-  if (invalidToken) {
+  if (invalidToken)
     return (
       <div style={{ padding: 20 }}>
         <h2>Invalid Request</h2>
         <p>This link is not valid.</p>
       </div>
     );
-  }
 
-  if (expired) {
+  if (expired)
     return (
       <div style={{ padding: 20 }}>
         <h2>Request Expired</h2>
         <p>This location request has expired.</p>
       </div>
     );
-  }
 
+  // -------------------------
+  // UI
+  // -------------------------
   return (
-    <div style={{ padding: 20 }}>
-      {coords && (
-        <div style={{ marginTop: 20 }}>
+    <div style={{ padding: 20, fontFamily: "Arial" }}>
+      <h2>🚚 Roadside Location Share</h2>
+
+      {/* <p>
+        Request ID: <strong>{request.token}</strong>
+      </p> */}
+
+      {/* GPS STATUS */}
+      {!bestAccuracy && <p>⏳ Waiting for GPS signal...</p>}
+
+      {bestAccuracy && (
+        <div>
           <p>
-            <strong>Location Link:</strong>
+            GPS Accuracy: <strong>{Math.round(bestAccuracy)}m</strong>
           </p>
 
-          <a
-            href={`https://www.google.com/maps?q=${coords.lat},${coords.lng}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{
-              color: "blue",
-              textDecoration: "underline",
-              fontSize: 16,
-            }}
-          >
-            Open in Google Maps
-          </a>
+          {bestAccuracy <= 10 && (
+            <p style={{ color: "green" }}>🟢 Excellent signal</p>
+          )}
+
+          {bestAccuracy > 10 && bestAccuracy <= 20 && (
+            <p style={{ color: "orange" }}>🟡 Good signal</p>
+          )}
+
+          {bestAccuracy > 20 && (
+            <p style={{ color: "red" }}>🔴 Waiting for better signal</p>
+          )}
         </div>
       )}
-      <h3>Roadside Location Share</h3>
 
-      <p>Request ID: {request.token}</p>
+      {/* HEADING / SPEED */}
+      {coords?.heading != null && (
+        <p>Direction: {Math.round(coords.heading)}°</p>
+      )}
 
-      {!bestAccuracy && <p>Waiting for GPS signal...</p>}
+      {coords?.speed != null && (
+        <p>Speed: {Math.round(coords.speed * 3.6)} km/h</p>
+      )}
 
-      {bestAccuracy && <p>Accuracy: {Math.round(bestAccuracy)}m</p>}
+      {/* MAP */}
+      {coords && (
+        <div style={{ marginTop: 15 }}>
+          <iframe
+            title="map"
+            width="100%"
+            height="250"
+            style={{
+              borderRadius: 10,
+              border: "1px solid #ccc",
+            }}
+            src={`https://maps.google.com/maps?q=${coords.lat},${coords.lng}&z=18&output=embed`}
+          />
+        </div>
+      )}
 
-      <p>
-        Status: {status === "EXCELLENT" && "🟢 Excellent signal"}
-        {status === "GOOD" && "🟡 Good signal"}
-        {status === "POOR" && "🔴 Weak signal"}
-        {status === "WAITING" && "⏳ Searching GPS..."}
-      </p>
+      {/* BUTTON */}
+      {bestAccuracy > REQUIRED_ACCURACY && (
+        <p>📍 Move outside for better accuracy</p>
+      )}
 
-      {bestAccuracy > 25 && <p>Move outside for better accuracy</p>}
-
-      <button disabled={!canSend} onClick={sendLocation}>
+      <button
+        disabled={!canSend}
+        onClick={sendLocation}
+        style={{
+          marginTop: 15,
+          padding: 12,
+          width: "100%",
+          fontSize: 16,
+        }}
+      >
         Send Location
       </button>
     </div>
