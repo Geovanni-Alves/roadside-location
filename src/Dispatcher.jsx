@@ -1,16 +1,16 @@
-import { useState } from 'react';
-import { v4 as uuidv4 } from 'uuid';
-import { supabase } from './supabase';
+import { useState } from "react";
+import { v4 as uuidv4 } from "uuid";
+import { supabase } from "./supabase";
 
 export default function Dispatcher() {
   const [form, setForm] = useState({
-    name: '',
-    phone: '',
-    car: '',
+    name: "",
+    phone: "",
+    car: "",
   });
 
   const [loading, setLoading] = useState(false);
-  const [link, setLink] = useState('');
+  const [link, setLink] = useState("");
 
   const createRequest = async () => {
     setLoading(true);
@@ -18,15 +18,23 @@ export default function Dispatcher() {
     try {
       // 1. Create secure token
       const token = uuidv4();
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
       // 2. Save request in Supabase
-      const { error } = await supabase.from('requests').insert({
-        token,
-        name: form.name,
-        phone: form.phone,
-        car: form.car,
-        status: 'waiting_location',
-      });
+      const { data, error } = await supabase
+        .from("requests")
+        .insert([
+          {
+            token,
+            name: form.name,
+            phone: form.phone,
+            car: form.car,
+            status: "waiting_location",
+            expires_at: expiresAt,
+          },
+        ])
+        .select()
+        .single();
 
       if (error) {
         alert(error.message);
@@ -53,7 +61,7 @@ This link is:
 - Used only for dispatch tracking
       `;
 
-      console.log('SMS MESSAGE:', smsMessage);
+      console.log("SMS MESSAGE:", smsMessage);
     } catch (err) {
       console.log(err);
     }
@@ -92,7 +100,7 @@ This link is:
       <br />
 
       <button onClick={createRequest} disabled={loading}>
-        {loading ? 'Creating...' : 'Create Request'}
+        {loading ? "Creating..." : "Create Request"}
       </button>
 
       {link && (
