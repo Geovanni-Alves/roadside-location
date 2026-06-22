@@ -14,7 +14,11 @@ export default function LocationShare() {
   const [expired, setExpired] = useState(false);
   const [invalidToken, setInvalidToken] = useState(false);
 
+  const [confirmed, setConfirmed] = useState(false);
+  const [forceEnabled, setForceEnabled] = useState(false);
+
   const REQUIRED_ACCURACY = 10;
+  const DEV_FAKE_GPS = true;
 
   // -------------------------
   // VALIDATE TOKEN (SUPABASE)
@@ -46,10 +50,35 @@ export default function LocationShare() {
     validateToken();
   }, [token]);
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setForceEnabled(true);
+    }, 30000);
+
+    return () => clearTimeout(timer);
+  }, []);
+
   // -------------------------
   // GPS WATCH
+  // DEV_FAKE_GPS
+  // Location: Vancouver
+  // Accuracy: 4m
+  // Heading: South
   // -------------------------
   useEffect(() => {
+    if (DEV_FAKE_GPS) {
+      setCoords({
+        lat: 49.2827,
+        lng: -123.1207,
+        heading: 180,
+      });
+
+      setAccuracy(4);
+      setBestAccuracy(4);
+
+      return;
+    }
+
     if (!navigator.geolocation) return;
 
     const watchId = navigator.geolocation.watchPosition(
@@ -67,7 +96,9 @@ export default function LocationShare() {
 
         setBestAccuracy((prev) => (prev === null ? acc : Math.min(prev, acc)));
       },
-      (err) => console.log("GPS ERROR:", err),
+      (err) => {
+        console.log("GPS ERROR:", err);
+      },
       {
         enableHighAccuracy: true,
         maximumAge: 0,
@@ -77,6 +108,18 @@ export default function LocationShare() {
 
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
+
+  const getDirection = (heading) => {
+    if (heading == null) return "Unknown";
+
+    if (heading >= 315 || heading < 45) return "Northbound";
+
+    if (heading >= 45 && heading < 135) return "Eastbound";
+
+    if (heading >= 135 && heading < 225) return "Southbound";
+
+    return "Westbound";
+  };
 
   // -------------------------
   // STATUS
@@ -137,6 +180,24 @@ export default function LocationShare() {
   // -------------------------
   return (
     <div style={{ padding: 20, fontFamily: "Arial" }}>
+      {DEV_FAKE_GPS && (
+        <div
+          style={{
+            background: "#ffcc00",
+            color: "#000",
+            padding: 12,
+            borderRadius: 8,
+            marginBottom: 20,
+            fontWeight: "bold",
+            textAlign: "center",
+          }}
+        >
+          ⚠️ DEVELOPMENT MODE - USING FAKE GPS
+          <br />
+          Vancouver, BC • Accuracy 4m • Southbound
+        </div>
+      )}
+
       <h2>🚚 Roadside Location Share</h2>
 
       {/* <p>
@@ -168,11 +229,7 @@ export default function LocationShare() {
 
       {/* HEADING / SPEED */}
       {coords?.heading != null && (
-        <p>Direction: {Math.round(coords.heading)}°</p>
-      )}
-
-      {coords?.speed != null && (
-        <p>Speed: {Math.round(coords.speed * 3.6)} km/h</p>
+        <p>Direction: {getDirection(coords.heading)}</p>
       )}
 
       {/* MAP */}
@@ -181,7 +238,7 @@ export default function LocationShare() {
           <iframe
             title="map"
             width="100%"
-            height="250"
+            height="450"
             style={{
               borderRadius: 10,
               border: "1px solid #ccc",
@@ -189,6 +246,28 @@ export default function LocationShare() {
             src={`https://maps.google.com/maps?q=${coords.lat},${coords.lng}&z=18&output=embed`}
           />
         </div>
+      )}
+
+      <p style={{ marginTop: 10, fontWeight: "bold" }}>
+        📍 Is this your vehicle location?
+      </p>
+
+      <button
+        onClick={() => setConfirmed(true)}
+        disabled={!coords}
+        style={{
+          marginRight: 10,
+          padding: 10,
+          background: confirmed ? "green" : "#eee",
+        }}
+      >
+        {confirmed ? "Confirmed ✅" : "Confirm Location"}
+      </button>
+
+      {confirmed && (
+        <p style={{ color: "green", marginTop: 10 }}>
+          Location confirmed. Ready to send.
+        </p>
       )}
 
       {/* BUTTON */}
