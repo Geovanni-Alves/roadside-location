@@ -18,7 +18,7 @@ export default function LocationShare() {
   const [forceEnabled, setForceEnabled] = useState(false);
 
   const REQUIRED_ACCURACY = 10;
-  const DEV_FAKE_GPS = true;
+  const DEV_FAKE_GPS = false;
 
   // -------------------------
   // VALIDATE TOKEN (SUPABASE)
