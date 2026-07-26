@@ -14,7 +14,21 @@ const pinIcon = new L.Icon({
   iconAnchor: [12, 41],
 });
 
-const REQUIRED_ACCURACY = 10;
+// Accuracy bands tuned for highway use. A moving vehicle rarely gets
+// consumer-GPS accuracy under 10m (multipath from overpasses, speed,
+// no line-of-sight to enough satellites). Since the pin is manually
+// dragged to the exact spot anyway, these are just an informational
+// signal for the driver/dispatcher - they no longer block sending.
+const ACCURACY_EXCELLENT = 15;
+const ACCURACY_GOOD = 30;
+
+// Dev-only fake coordinate so you can test drag/geocoding/UI flow in
+// Chrome without driving anywhere. Prefer Chrome DevTools > More Tools >
+// Sensors > Geolocation for realistic testing (it feeds navigator.geolocation
+// normally). This flag is just a quick manual override, gated so it can
+// never ship enabled in production.
+const IS_DEV = import.meta.env?.DEV === true;
+const MOCK_LOCATION = { lat: 49.2827, lng: -123.1207 }; // Vancouver, BC
 
 export default function LocationShare() {
   const { token } = useParams();
@@ -32,10 +46,15 @@ export default function LocationShare() {
   // extra text reference (essential on highways: "km 45, northbound, past gas station X")
   const [reference, setReference] = useState("");
 
+  // manually confirmed direction of travel - more reliable than GPS heading
+  // when the vehicle is stopped (see getDirection notes above)
+  const [travelDirection, setTravelDirection] = useState(null);
+
   const [request, setRequest] = useState(null);
   const [loading, setLoading] = useState(true);
   const [expired, setExpired] = useState(false);
   const [invalidToken, setInvalidToken] = useState(false);
+  const [alreadySent, setAlreadySent] = useState(false);
 
   const [confirmed, setConfirmed] = useState(false);
   const [sending, setSending] = useState(false);
@@ -66,12 +85,37 @@ export default function LocationShare() {
         return;
       }
 
+      // one-time use: block re-opening a link whose location was already sent
+      if (data.status === "location_sent") {
+        setAlreadySent(true);
+        setLoading(false);
+        return;
+      }
+
       setRequest(data);
       setLoading(false);
     };
 
     validateToken();
   }, [token]);
+
+  // Re-check expiration while the tab stays open. The check above only
+  // runs once on load, so a tab left open past expires_at would otherwise
+  // keep accepting submissions. This is a UX safety net only - also
+  // enforce expiration/one-time-use server-side (RLS policy or a check
+  // in a Postgres trigger/edge function), since a client-side check can
+  // always be bypassed by someone editing the JS.
+  useEffect(() => {
+    if (!request?.expires_at) return;
+
+    const interval = setInterval(() => {
+      if (new Date(request.expires_at) < new Date()) {
+        setExpired(true);
+      }
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, [request]);
 
   // -------------------------
   // GPS WATCH (initial / reference position)
@@ -145,7 +189,15 @@ export default function LocationShare() {
     return () => clearTimeout(geocodeTimer.current);
   }, [pinCoords, reverseGeocode]);
 
-  const getDirection = (heading) => {
+  // GPS "heading" is course-over-ground, computed from consecutive
+  // position fixes - not a compass reading. Below this speed, position
+  // noise (a few meters of GPS error) looks like "movement" and produces
+  // a bogus, jumpy heading. Only trust it once the vehicle is actually
+  // moving.
+  const MIN_SPEED_FOR_HEADING = 1.5; // m/s (~5.4 km/h)
+
+  const getDirection = (heading, speed) => {
+    if (speed == null || speed < MIN_SPEED_FOR_HEADING) return "Stopped";
     if (heading == null) return "Unknown";
     if (heading >= 315 || heading < 45) return "Northbound";
     if (heading >= 45 && heading < 135) return "Eastbound";
@@ -155,9 +207,18 @@ export default function LocationShare() {
 
   const getStatus = (acc) => {
     if (!acc) return "WAITING";
-    if (acc <= 10) return "EXCELLENT";
-    if (acc <= 20) return "GOOD";
+    if (acc <= ACCURACY_EXCELLENT) return "EXCELLENT";
+    if (acc <= ACCURACY_GOOD) return "GOOD";
     return "POOR";
+  };
+
+  // dev-only: inject a fixed coordinate as if it came from GPS, so you
+  // can test the drag/geocoding/confirm flow without physically moving
+  const useMockLocation = () => {
+    setGpsCoords({ ...MOCK_LOCATION, heading: 180, speed: 20 });
+    setAccuracy(4);
+    setBestAccuracy(4);
+    setPinCoords((prev) => prev ?? { lat: MOCK_LOCATION.lat, lng: MOCK_LOCATION.lng });
   };
 
   const status = getStatus(bestAccuracy);
@@ -205,6 +266,7 @@ export default function LocationShare() {
         accuracy: bestAccuracy,
         address_label: addressLabel,
         reference_note: reference,
+        travel_direction: travelDirection,
         status: "location_sent",
       })
       .eq("token", token);
@@ -240,12 +302,40 @@ export default function LocationShare() {
       </div>
     );
 
+  if (alreadySent)
+    return (
+      <div style={{ padding: 20 }}>
+        <h2>Location Already Sent</h2>
+        <p>This link has already been used. Contact dispatch if you need to resend.</p>
+      </div>
+    );
+
   // -------------------------
   // UI
   // -------------------------
   return (
     <div style={{ padding: 16, fontFamily: "Arial", maxWidth: 520, margin: "0 auto" }}>
       <h2>🚚 Share Location (Tow Truck)</h2>
+
+      {IS_DEV && (
+        <div
+          style={{
+            background: "#ffcc00",
+            padding: 10,
+            borderRadius: 8,
+            marginBottom: 14,
+            fontSize: 13,
+          }}
+        >
+          <strong>DEV MODE</strong> — for realistic GPS testing use Chrome
+          DevTools &gt; More Tools &gt; Sensors &gt; Geolocation. Or click
+          below to inject a fixed test coordinate instantly:
+          <br />
+          <button onClick={useMockLocation} style={{ marginTop: 6, padding: 6 }}>
+            Use test location (Vancouver)
+          </button>
+        </div>
+      )}
 
       {!gpsCoords && <p>⏳ Waiting for GPS signal...</p>}
 
@@ -254,11 +344,35 @@ export default function LocationShare() {
           <p style={{ margin: "4px 0" }}>
             GPS Accuracy: <strong>{Math.round(bestAccuracy)}m</strong> ({status})
           </p>
-          {gpsCoords?.heading != null && (
-            <p style={{ margin: "4px 0" }}>Vehicle heading: {getDirection(gpsCoords.heading)}</p>
+          {gpsCoords && (
+            <p style={{ margin: "4px 0" }}>Vehicle heading (GPS): {getDirection(gpsCoords.heading, gpsCoords.speed)}</p>
           )}
         </div>
       )}
+
+      <div style={{ marginTop: 4, marginBottom: 14 }}>
+        <label style={{ fontWeight: "bold", fontSize: 14 }}>
+          Which direction were you traveling? (helps a lot on divided highways)
+        </label>
+        <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+          {["North", "South", "East", "West", "Not sure"].map((dir) => (
+            <button
+              key={dir}
+              onClick={() => setTravelDirection(dir)}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 20,
+                border: travelDirection === dir ? "2px solid #2563eb" : "1px solid #ccc",
+                background: travelDirection === dir ? "#2563eb" : "#fff",
+                color: travelDirection === dir ? "#fff" : "#000",
+                fontWeight: travelDirection === dir ? "bold" : "normal",
+              }}
+            >
+              {dir}
+            </button>
+          ))}
+        </div>
+      </div>
 
       <p style={{ fontWeight: "bold", marginBottom: 4 }}>
         📍 Drag the pin to the exact spot (just like Uber's pickup pin)
