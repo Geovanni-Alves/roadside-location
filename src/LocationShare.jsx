@@ -1,13 +1,36 @@
 import { supabase } from "./supabase";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams } from "react-router-dom";
+import { MapContainer, TileLayer, Marker, useMapEvents } from "react-leaflet";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
+
+// Default Leaflet icon (avoids the broken-icon bug in production builds)
+const pinIcon = new L.Icon({
+  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+});
+
+const REQUIRED_ACCURACY = 10;
 
 export default function LocationShare() {
   const { token } = useParams();
 
-  const [coords, setCoords] = useState(null);
+  // raw GPS position (initial reference point)
+  const [gpsCoords, setGpsCoords] = useState(null);
   const [accuracy, setAccuracy] = useState(null);
   const [bestAccuracy, setBestAccuracy] = useState(null);
+
+  // PIN position (what the user actually adjusted - Uber-style)
+  const [pinCoords, setPinCoords] = useState(null);
+  const [addressLabel, setAddressLabel] = useState("");
+  const [geocoding, setGeocoding] = useState(false);
+
+  // extra text reference (essential on highways: "km 45, northbound, past gas station X")
+  const [reference, setReference] = useState("");
 
   const [request, setRequest] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -15,10 +38,10 @@ export default function LocationShare() {
   const [invalidToken, setInvalidToken] = useState(false);
 
   const [confirmed, setConfirmed] = useState(false);
-  const [forceEnabled, setForceEnabled] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
 
-  const REQUIRED_ACCURACY = 10;
-  const DEV_FAKE_GPS = false;
+  const geocodeTimer = useRef(null);
 
   // -------------------------
   // VALIDATE TOKEN (SUPABASE)
@@ -50,51 +73,29 @@ export default function LocationShare() {
     validateToken();
   }, [token]);
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setForceEnabled(true);
-    }, 30000);
-
-    return () => clearTimeout(timer);
-  }, []);
-
   // -------------------------
-  // GPS WATCH
-  // DEV_FAKE_GPS
-  // Location: Vancouver
-  // Accuracy: 4m
-  // Heading: South
+  // GPS WATCH (initial / reference position)
   // -------------------------
   useEffect(() => {
-    if (DEV_FAKE_GPS) {
-      setCoords({
-        lat: 49.2827,
-        lng: -123.1207,
-        heading: 180,
-      });
-
-      setAccuracy(4);
-      setBestAccuracy(4);
-
-      return;
-    }
-
     if (!navigator.geolocation) return;
 
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         const acc = pos.coords.accuracy;
-
-        setCoords({
+        const next = {
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
           heading: pos.coords.heading,
           speed: pos.coords.speed,
-        });
+        };
 
+        setGpsCoords(next);
         setAccuracy(acc);
-
         setBestAccuracy((prev) => (prev === null ? acc : Math.min(prev, acc)));
+
+        // only auto-place the pin while the user hasn't started
+        // adjusting it manually yet
+        setPinCoords((prev) => prev ?? { lat: next.lat, lng: next.lng });
       },
       (err) => {
         console.log("GPS ERROR:", err);
@@ -109,21 +110,49 @@ export default function LocationShare() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
+  // -------------------------
+  // REVERSE GEOCODING (shows the street/highway under the pin)
+  // Uses Nominatim (OpenStreetMap) - free, no API key needed.
+  // For production with high volume, swap for Google Geocoding
+  // or Mapbox (more reliable, no 1 req/s rate limit).
+  // -------------------------
+  const reverseGeocode = useCallback(async (lat, lng) => {
+    setGeocoding(true);
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
+        { headers: { Accept: "application/json" } },
+      );
+      const data = await res.json();
+      setAddressLabel(data?.display_name ?? "Address not found");
+    } catch (err) {
+      setAddressLabel("Could not resolve address");
+    } finally {
+      setGeocoding(false);
+    }
+  }, []);
+
+  // debounce: only geocode ~600ms after the pin stops moving
+  useEffect(() => {
+    if (!pinCoords) return;
+
+    if (geocodeTimer.current) clearTimeout(geocodeTimer.current);
+
+    geocodeTimer.current = setTimeout(() => {
+      reverseGeocode(pinCoords.lat, pinCoords.lng);
+    }, 600);
+
+    return () => clearTimeout(geocodeTimer.current);
+  }, [pinCoords, reverseGeocode]);
+
   const getDirection = (heading) => {
     if (heading == null) return "Unknown";
-
     if (heading >= 315 || heading < 45) return "Northbound";
-
     if (heading >= 45 && heading < 135) return "Eastbound";
-
     if (heading >= 135 && heading < 225) return "Southbound";
-
     return "Westbound";
   };
 
-  // -------------------------
-  // STATUS
-  // -------------------------
   const getStatus = (acc) => {
     if (!acc) return "WAITING";
     if (acc <= 10) return "EXCELLENT";
@@ -132,30 +161,66 @@ export default function LocationShare() {
   };
 
   const status = getStatus(bestAccuracy);
+  const canSend = pinCoords && confirmed;
 
-  const canSend = coords && bestAccuracy && bestAccuracy <= REQUIRED_ACCURACY;
+  // -------------------------
+  // MOVE THE PIN (map click OR drag)
+  // -------------------------
+  function PinController() {
+    useMapEvents({
+      click(e) {
+        setPinCoords({ lat: e.latlng.lat, lng: e.latlng.lng });
+        setConfirmed(false);
+      },
+    });
+    return null;
+  }
+
+  const handleMarkerDragEnd = (e) => {
+    const { lat, lng } = e.target.getLatLng();
+    setPinCoords({ lat, lng });
+    setConfirmed(false);
+  };
+
+  const recenterOnGps = () => {
+    if (!gpsCoords) return;
+    setPinCoords({ lat: gpsCoords.lat, lng: gpsCoords.lng });
+    setConfirmed(false);
+  };
 
   // -------------------------
   // SEND LOCATION
   // -------------------------
   const sendLocation = async () => {
-    await supabase
+    if (!pinCoords) return;
+    setSending(true);
+
+    const { error } = await supabase
       .from("requests")
       .update({
-        latitude: coords.lat,
-        longitude: coords.lng,
+        latitude: pinCoords.lat,
+        longitude: pinCoords.lng,
+        gps_latitude: gpsCoords?.lat ?? null,
+        gps_longitude: gpsCoords?.lng ?? null,
         accuracy: bestAccuracy,
+        address_label: addressLabel,
+        reference_note: reference,
         status: "location_sent",
       })
       .eq("token", token);
 
-    const link = `https://www.google.com/maps?q=${coords.lat},${coords.lng}`;
+    setSending(false);
 
-    alert("LOCATION SENT:\n\n" + link);
+    if (error) {
+      alert("Error sending location: " + error.message);
+      return;
+    }
+
+    setSent(true);
   };
 
   // -------------------------
-  // STATES
+  // ERROR STATES
   // -------------------------
   if (loading) return <h3>Checking request...</h3>;
 
@@ -179,104 +244,100 @@ export default function LocationShare() {
   // UI
   // -------------------------
   return (
-    <div style={{ padding: 20, fontFamily: "Arial" }}>
-      {DEV_FAKE_GPS && (
-        <div
-          style={{
-            background: "#ffcc00",
-            color: "#000",
-            padding: 12,
-            borderRadius: 8,
-            marginBottom: 20,
-            fontWeight: "bold",
-            textAlign: "center",
-          }}
-        >
-          ⚠️ DEVELOPMENT MODE - USING FAKE GPS
-          <br />
-          Vancouver, BC • Accuracy 4m • Southbound
-        </div>
-      )}
+    <div style={{ padding: 16, fontFamily: "Arial", maxWidth: 520, margin: "0 auto" }}>
+      <h2>🚚 Share Location (Tow Truck)</h2>
 
-      <h2>🚚 Roadside Location Share</h2>
-
-      {/* <p>
-        Request ID: <strong>{request.token}</strong>
-      </p> */}
-
-      {/* GPS STATUS */}
-      {!bestAccuracy && <p>⏳ Waiting for GPS signal...</p>}
+      {!gpsCoords && <p>⏳ Waiting for GPS signal...</p>}
 
       {bestAccuracy && (
-        <div>
-          <p>
-            GPS Accuracy: <strong>{Math.round(bestAccuracy)}m</strong>
+        <div style={{ marginBottom: 10 }}>
+          <p style={{ margin: "4px 0" }}>
+            GPS Accuracy: <strong>{Math.round(bestAccuracy)}m</strong> ({status})
           </p>
-
-          {bestAccuracy <= 10 && (
-            <p style={{ color: "green" }}>🟢 Excellent signal</p>
-          )}
-
-          {bestAccuracy > 10 && bestAccuracy <= 20 && (
-            <p style={{ color: "orange" }}>🟡 Good signal</p>
-          )}
-
-          {bestAccuracy > 20 && (
-            <p style={{ color: "red" }}>🔴 Waiting for better signal</p>
+          {gpsCoords?.heading != null && (
+            <p style={{ margin: "4px 0" }}>Vehicle heading: {getDirection(gpsCoords.heading)}</p>
           )}
         </div>
       )}
 
-      {/* HEADING / SPEED */}
-      {coords?.heading != null && (
-        <p>Direction: {getDirection(coords.heading)}</p>
-      )}
-
-      {/* MAP */}
-      {coords && (
-        <div style={{ marginTop: 15 }}>
-          <iframe
-            title="map"
-            width="100%"
-            height="450"
-            style={{
-              borderRadius: 10,
-              border: "1px solid #ccc",
-            }}
-            src={`https://maps.google.com/maps?q=${coords.lat},${coords.lng}&z=18&output=embed`}
-          />
-        </div>
-      )}
-
-      <p style={{ marginTop: 10, fontWeight: "bold" }}>
-        📍 Is this your vehicle location?
+      <p style={{ fontWeight: "bold", marginBottom: 4 }}>
+        📍 Drag the pin to the exact spot (just like Uber's pickup pin)
       </p>
+      <p style={{ fontSize: 13, color: "#666", marginTop: 0 }}>
+        You can also tap anywhere on the map to move the pin.
+      </p>
+
+      {pinCoords && (
+        <div style={{ borderRadius: 10, overflow: "hidden", border: "1px solid #ccc" }}>
+          <MapContainer
+            center={[pinCoords.lat, pinCoords.lng]}
+            zoom={18}
+            style={{ height: 380, width: "100%" }}
+          >
+            <TileLayer
+              attribution='&copy; OpenStreetMap contributors'
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
+            <PinController />
+            <Marker
+              position={[pinCoords.lat, pinCoords.lng]}
+              draggable
+              icon={pinIcon}
+              eventHandlers={{ dragend: handleMarkerDragEnd }}
+            />
+          </MapContainer>
+        </div>
+      )}
+
+      <div style={{ marginTop: 10, minHeight: 20 }}>
+        {geocoding && <p style={{ fontSize: 13, color: "#888" }}>Resolving address...</p>}
+        {!geocoding && addressLabel && (
+          <p style={{ fontSize: 13, color: "#333" }}>📌 {addressLabel}</p>
+        )}
+      </div>
+
+      {gpsCoords && (
+        <button onClick={recenterOnGps} style={{ padding: 8, marginTop: 6 }}>
+          ↺ Back to my GPS position
+        </button>
+      )}
+
+      <div style={{ marginTop: 14 }}>
+        <label style={{ fontWeight: "bold", fontSize: 14 }}>
+          Reference point (optional, but recommended on highways)
+        </label>
+        <textarea
+          value={reference}
+          onChange={(e) => setReference(e.target.value)}
+          placeholder="Ex: KM 45 northbound, right after the Shell gas station, on the shoulder"
+          rows={2}
+          style={{ width: "100%", marginTop: 4, padding: 8, fontSize: 14 }}
+        />
+      </div>
+
+      <p style={{ marginTop: 14, fontWeight: "bold" }}>Is the pin in the correct spot?</p>
 
       <button
         onClick={() => setConfirmed(true)}
-        disabled={!coords}
+        disabled={!pinCoords}
         style={{
           marginRight: 10,
           padding: 10,
           background: confirmed ? "green" : "#eee",
+          color: confirmed ? "#fff" : "#000",
         }}
       >
         {confirmed ? "Confirmed ✅" : "Confirm Location"}
       </button>
 
-      {confirmed && (
+      {confirmed && !sent && (
         <p style={{ color: "green", marginTop: 10 }}>
           Location confirmed. Ready to send.
         </p>
       )}
 
-      {/* BUTTON */}
-      {bestAccuracy > REQUIRED_ACCURACY && (
-        <p>📍 Move outside for better accuracy</p>
-      )}
-
       <button
-        disabled={!canSend}
+        disabled={!canSend || sending || sent}
         onClick={sendLocation}
         style={{
           marginTop: 15,
@@ -285,7 +346,7 @@ export default function LocationShare() {
           fontSize: 16,
         }}
       >
-        Send Location
+        {sent ? "Location sent ✅" : sending ? "Sending..." : "Send Location"}
       </button>
     </div>
   );
