@@ -28,6 +28,14 @@ const ACCURACY_GOOD = 30;
 // normally). This flag is just a quick manual override, gated so it can
 // never ship enabled in production.
 const IS_DEV = import.meta.env?.DEV === true;
+
+// ⚠️ TESTING ONLY - set back to false before going live. While true:
+// - links never expire
+// - the same link can be used to send multiple locations in a row
+//   (each send creates a new row in location_pings instead of
+//   overwriting the request), so you can test from different spots
+//   without generating a new link every time.
+const TEST_MODE = true;
 const MOCK_LOCATION = { lat: 49.2827, lng: -123.1207 }; // Vancouver, BC
 
 export default function LocationShare() {
@@ -79,14 +87,14 @@ export default function LocationShare() {
         return;
       }
 
-      if (data.expires_at && new Date(data.expires_at) < new Date()) {
+      if (!TEST_MODE && data.expires_at && new Date(data.expires_at) < new Date()) {
         setExpired(true);
         setLoading(false);
         return;
       }
 
       // one-time use: block re-opening a link whose location was already sent
-      if (data.status === "location_sent") {
+      if (!TEST_MODE && data.status === "location_sent") {
         setAlreadySent(true);
         setLoading(false);
         return;
@@ -106,7 +114,7 @@ export default function LocationShare() {
   // in a Postgres trigger/edge function), since a client-side check can
   // always be bypassed by someone editing the JS.
   useEffect(() => {
-    if (!request?.expires_at) return;
+    if (TEST_MODE || !request?.expires_at) return;
 
     const interval = setInterval(() => {
       if (new Date(request.expires_at) < new Date()) {
@@ -256,9 +264,9 @@ export default function LocationShare() {
     if (!pinCoords) return;
     setSending(true);
 
-    const { error } = await supabase
-      .from("requests")
-      .update({
+    const { error } = await supabase.from("location_pings").insert([
+      {
+        request_token: token,
         latitude: pinCoords.lat,
         longitude: pinCoords.lng,
         gps_latitude: gpsCoords?.lat ?? null,
@@ -267,9 +275,15 @@ export default function LocationShare() {
         address_label: addressLabel,
         reference_note: reference,
         travel_direction: travelDirection,
-        status: "location_sent",
-      })
-      .eq("token", token);
+      },
+    ]);
+
+    // Mark the request as having received at least one location. In
+    // TEST_MODE this doesn't block reuse (see the alreadySent check
+    // above), it's just informational for the dashboard.
+    if (!error) {
+      await supabase.from("requests").update({ status: "location_sent" }).eq("token", token);
+    }
 
     setSending(false);
 
@@ -279,6 +293,16 @@ export default function LocationShare() {
     }
 
     setSent(true);
+
+    // TEST_MODE: let the driver send again from a new spot without
+    // reloading the page - reset "sent"/"confirmed" after a short delay
+    // so the success message is still visible for a moment.
+    if (TEST_MODE) {
+      setTimeout(() => {
+        setSent(false);
+        setConfirmed(false);
+      }, 1500);
+    }
   };
 
   // -------------------------
